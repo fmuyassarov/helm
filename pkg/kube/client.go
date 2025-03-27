@@ -436,17 +436,26 @@ func (c *Client) Update(original, target ResourceList, force bool) (*Result, err
 		}
 
 		originalInfo := original.Get(info)
-		if originalInfo == nil {
-			kind := info.Mapping.GroupVersionKind.Kind
-			return errors.Errorf("no %s with the name %q found", kind, info.Name)
-		}
-
-		if err := updateResource(c, info, originalInfo.Object, force); err != nil {
-			c.Log("error updating the resource %q:\n\t %v", info.Name, err)
-			updateErrors = append(updateErrors, err.Error())
+		if originalInfo != nil {
+			// Proceed to update the resource
+			if err := updateResource(c, info, originalInfo.Object, force); err != nil {
+				c.Log("Error updating the resource %q: %v", info.Name, err)
+				updateErrors = append(updateErrors, fmt.Sprintf("failed to update resource %q: %v", info.Name, err))
+			}
+		} else {
+			// If the original resource is not found, force update the resource
+			if err := updateResource(c, info, nil, true); err != nil {
+				c.Log("Error force updating the resource %q: %v", info.Name, err)
+				updateErrors = append(updateErrors, fmt.Sprintf("failed to force update resource %q: %v", info.Name, err))
+			}
 		}
 		// Because we check for errors later, append the info regardless
 		res.Updated = append(res.Updated, info)
+
+		kind := info.Mapping.GroupVersionKind.Kind
+		if _, err := helper.Get(info.Namespace, info.Name); err != nil && !apierrors.IsNotFound(err) {
+			return errors.Errorf("no %s with the name %q found in namespace %q", kind, info.Name, info.Namespace)
+		}
 
 		return nil
 	})
@@ -655,11 +664,21 @@ func updateResource(c *Client, target *resource.Info, currentObj runtime.Object,
 		if err != nil {
 			return errors.Wrap(err, "failed to replace object")
 		}
-		c.Log("Replaced %q with kind %s for kind %s", target.Name, currentObj.GetObjectKind().GroupVersionKind().Kind, kind)
+		c.Log("Replaced %q with kind %s for kind %s", target.Name, target.Object.GetObjectKind().GroupVersionKind().Kind, kind)
 	} else {
-		patch, patchType, err := createPatch(target, currentObj)
-		if err != nil {
-			return errors.Wrap(err, "failed to create patch")
+		var patch []byte
+		var patchType types.PatchType
+		var err error
+
+		if currentObj != nil {
+			patch, patchType, err = createPatch(target, currentObj)
+			if err != nil {
+				return errors.Wrap(err, "failed to create patch")
+			}
+		} else {
+			// If currentObj is nil, treat it as a full replacement
+			patch = nil
+			patchType = types.MergePatchType
 		}
 
 		if patch == nil || string(patch) == "{}" {
